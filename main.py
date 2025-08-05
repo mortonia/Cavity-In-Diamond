@@ -1,177 +1,79 @@
 import os
-import sys
-import shutil
 import numpy as np
-from ase.io import write
-from ase import Atoms
+from ase.io import read, write
 from ase.constraints import FixAtoms
-
-from config import ELEMENT, REPEAT, LATTICE_CONSTANT, CAVITY_BUFFER, DISPLACEMENT_THRESHOLD, USE_MOLECULAR_CRYSTAL
-from crystal_utils import create_crystal, carve_elliptical_cavity
+from config import (
+    ELEMENT, REPEAT, LATTICE_CONSTANT,
+    DISPLACEMENT_THRESHOLD, OUTPUT_DIR,
+    CAVITY_BUFFER, CAVITY_RADII, MOLECULE_PATH
+)
 from molecule_utils import load_and_center_molecule, compute_cavity_radii
+from crystal_utils import (
+    create_crystal, create_cavity, insert_molecule,
+    remove_unbound_hydrogens, align_single_molecule,
+    align_molecule_in_structure, extract_spherical_region,
+    ellipsoid_atoms, min_clearance_to_crystal,
+    ellipsoid_markers
+)
 from relaxation import relax_with_lj
-from output_utils import print_cell_dimensions, print_crystal_info
+from write_molecule_with_cavity_markers import write_molecule_with_cavity_markers
 
-
-def write_plain_xyz(filename, atoms, title="Structure"):
-    with open(filename, 'w') as f:
-        f.write(f"{len(atoms)}\n")
-        f.write(f"{title}\n")
-        for s, pos in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
-            f.write(f"{s:<3}  {pos[0]:>12.6f}  {pos[1]:>12.6f}  {pos[2]:>12.6f}\n")
-
-
-def freeze_by_distance(atoms, center, cutoff):
-    freeze_indices = []
-    tags = np.zeros(len(atoms), dtype=int)
-    for i, pos in enumerate(atoms.get_positions()):
-        if np.linalg.norm(pos - center) > cutoff:
-            freeze_indices.append(i)
-            tags[i] = 1
-    atoms.set_tags(tags)
-    atoms.set_constraint(FixAtoms(indices=freeze_indices))
-    print(f"[Freeze] {len(freeze_indices)} atoms frozen beyond {cutoff} Å.")
-    return freeze_indices
-
+# Main workflow: builds crystal, carves cavity, inserts molecule, relaxes, and writes outputs
 
 def main():
-    if len(sys.argv) > 1:
-        molecule_filename = sys.argv[1]
-    else:
-        molecule_filename = 'water.xyz'
+    # Load and center guest molecule at origin
+    mol = load_and_center_molecule(MOLECULE_PATH, np.array([0.0, 0.0, 0.0]))
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    xyz_title = sys.argv[5] if len(sys.argv) > 5 else "relaxed_structure"
+    # Step 1: Build and save raw crystal cluster
+    crystal = create_crystal(REPEAT, LATTICE_CONSTANT)
+    write(os.path.join(OUTPUT_DIR, "step1_crystal.xyz"), crystal)
 
-    
+    # Step 2: Orient molecule along its key axis (atoms 3-4) to +Y
+    mol = align_single_molecule(mol, atom1_idx=3, atom2_idx=4, target_axis=np.array([0.0,1.0,0.0]))
 
+    # Step 3: Compute cavity shape from molecule and carve it out
+    radii = compute_cavity_radii(mol, CAVITY_BUFFER)
+    cavity_cryst = create_cavity(crystal, radii=radii)
+    write(os.path.join(OUTPUT_DIR, "step2_cavity.xyz"), cavity_cryst)
 
-    BASE_OUTPUT_DIR = "output"
-    molecule_name = os.path.splitext(os.path.basename(molecule_filename))[0]
-    OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, molecule_name)
-    if os.path.exists(OUTPUT_DIR):
-        shutil.rmtree(OUTPUT_DIR)
-    os.makedirs(OUTPUT_DIR)
+    # Step 4: Insert oriented molecule into cavity and save
+    combined = insert_molecule(cavity_cryst, mol, center=True, cavity_radii=radii)
+    write(os.path.join(OUTPUT_DIR, "step3_molecule_inserted.xyz"), combined)
 
-    crystal = create_crystal(ELEMENT, REPEAT, LATTICE_CONSTANT)
-    print_cell_dimensions(crystal, output_dir=OUTPUT_DIR)
-    print_crystal_info(crystal, label="Original", output_dir=OUTPUT_DIR)
-    
-    cavity_center = crystal.get_cell().sum(axis=0) / 2
-    print(f"[Centering] Automatically using cavity center: {cavity_center}")
+    # Step 5: Freeze molecule atoms, check clearance to crystal
+    start_idx = len(cavity_cryst)
+    mol_idx = list(range(start_idx, start_idx + len(mol)))
+    combined.set_constraint(FixAtoms(indices=mol_idx))
+    dmin, _, _ = min_clearance_to_crystal(combined, mol_idx)
+    print(f"[Cavity check] Minimum distance = {dmin:.3f} Å")
 
-    if cavity_center is None:
-        cavity_center = crystal.get_cell().sum(axis=0) / 2
+    # Step 6: Relax local region with LJ and BFGS
+    orig = combined.get_positions()
+    relaxed, disp, _ = relax_with_lj(combined, orig, DISPLACEMENT_THRESHOLD,
+                                      OUTPUT_DIR, molecule_indices=mol_idx)
+    write(os.path.join(OUTPUT_DIR, "step5_relaxed_full.xyz"), relaxed)
 
-    molecule = load_and_center_molecule(molecule_filename, cavity_center)
-    radius_x, radius_y, radius_z = compute_cavity_radii(molecule, CAVITY_BUFFER)
-    crystal_cavity = carve_elliptical_cavity(crystal, cavity_center, radius_x, radius_y, radius_z)
-    print_crystal_info(crystal_cavity, label="After Cavity", output_dir=OUTPUT_DIR)
+    # Step 7: Strip out molecule and any unbound H, save crystal fragment
+    frag = relaxed.copy()
+    del frag[mol_idx]
+    frag = remove_unbound_hydrogens(frag)
+    write(os.path.join(OUTPUT_DIR, "step6_relaxed_crystal_cavity_no_molecule.xyz"), frag)
 
-    combined = crystal_cavity + molecule
+    # Step 8: Save guest molecule separately
+    write(os.path.join(OUTPUT_DIR, "step7_molecule.xyz"), mol)
 
-    if USE_MOLECULAR_CRYSTAL:
-        from molecule_utils import freeze_distant_molecules
-        freeze_distant_molecules(combined[:-len(molecule)], cavity_center, cutoff_distance=5.0, molecule_size=3)
-    else:
-        freeze_by_distance(combined[:-len(molecule)], cavity_center, cutoff=5.0)
+    # Step 9: Re-align full relaxed structure so molecule axis is +Y at origin
+    aligned = align_molecule_in_structure(relaxed, mol_idx,
+                                          atom1_idx=0, atom2_idx=1,
+                                          target_axis=np.array([0.0,1.0,0.0]),
+                                          translate_to_origin=True)
+    write(os.path.join(OUTPUT_DIR, "step8_aligned_structure.xyz"), aligned)
 
-    # Freeze guest molecule
-    num_mol_atoms = len(molecule)
-    mol_indices = list(range(len(combined) - num_mol_atoms, len(combined)))
-
-    # Safely get all existing constraint indices
-    existing_constraints = []
-    for constraint in combined.constraints:
-        if hasattr(constraint, 'get_indices'):
-            existing_constraints.extend(constraint.get_indices())
-
-    all_constraints = existing_constraints + mol_indices
-    combined.set_constraint(FixAtoms(indices=all_constraints))
-
-    original_positions = combined.get_positions().copy()
-    write(os.path.join(OUTPUT_DIR, "before_lj.xyz"), combined)
-
-    relaxed, displacements, num_displaced = relax_with_lj(
-        combined, original_positions, DISPLACEMENT_THRESHOLD, OUTPUT_DIR
-    )
-    
-    print(f"[Debug] Total atoms: {len(relaxed)}")
-    
-    # --- Split relaxed structure ---
-    relaxed_positions = relaxed.get_positions()
-    relaxed_symbols = relaxed.get_chemical_symbols()
-    relaxed_cell = relaxed.get_cell()
-    relaxed_pbc = relaxed.get_pbc()
-
-    # Extract relaxed molecule
-    relaxed_molecule = Atoms(
-        symbols=relaxed_symbols[-num_mol_atoms:], 
-        positions=relaxed_positions[-num_mol_atoms:],
-        cell=relaxed_cell,
-        pbc=relaxed_pbc
-    )
-
-    # Extract relaxed crystal (everything except the last num_mol_atoms)
-    relaxed_crystal_only = Atoms(
-        symbols=relaxed_symbols[:-num_mol_atoms],
-        positions=relaxed_positions[:-num_mol_atoms],
-        cell=relaxed_cell,
-        pbc=relaxed_pbc
-    )
-
-    # Write each .xyz
-    write_plain_xyz(os.path.join(OUTPUT_DIR, "relaxed_crystal_only.xyz"), relaxed_crystal_only, title="Relaxed Crystal (No Molecule)")
-    write_plain_xyz(os.path.join(OUTPUT_DIR, "relaxed_molecule_only.xyz"), relaxed_molecule, title="Relaxed Molecule Only")
-
-    
-    # Identify frozen atoms
-    frozen_indices = set()
-    for constraint in relaxed.constraints:
-        if hasattr(constraint, 'get_indices'):
-            frozen_indices.update(constraint.get_indices())
-            
-    print(f"[Debug] Number of frozen atoms: {len(frozen_indices)}")
-    print(f"[Debug] Sample frozen atom indices: {list(frozen_indices)[:10]}")
-
-    displacements = np.linalg.norm(relaxed.get_positions() - original_positions, axis=1)
-   
-
-    movable_indices = [i for i in range(len(relaxed)) if i not in frozen_indices]
-    displaced_movable = [i for i in movable_indices if displacements[i] > DISPLACEMENT_THRESHOLD]
-
-    print(f"[Debug] Number of movable atoms: {len(movable_indices)}")
-    print(f"[Debug] Number of displaced movable atoms: {len(displaced_movable)}")
-    
-    
-    num_displaced_movable = len(displaced_movable)
-
-    print(f"[LJ] Displaced MOVABLE atoms > {DISPLACEMENT_THRESHOLD} Å: {num_displaced_movable}")
-    with open(os.path.join(OUTPUT_DIR, "info.txt"), "a") as f:
-        f.write(f"[LJ] Displaced MOVABLE atoms > {DISPLACEMENT_THRESHOLD} Å: {num_displaced_movable}\n")
-
-    # Tag displaced atoms
-    tags = relaxed.get_tags()
-    tags[displacements > DISPLACEMENT_THRESHOLD] = 2
-    relaxed.set_tags(tags)
-
-    from ase.io import Trajectory
-    Trajectory(os.path.join(OUTPUT_DIR, "after_lj_full.traj"), 'w').write(relaxed)
-
-    relaxed_stripped = Atoms(
-        symbols=relaxed.get_chemical_symbols(),
-        positions=relaxed.get_positions(),
-        cell=relaxed.get_cell(),
-        pbc=relaxed.get_pbc()
-    )
-    write_plain_xyz(os.path.join(OUTPUT_DIR, "after_lj.xyz"), relaxed_stripped, title=xyz_title)
-
-    with open(os.path.join(OUTPUT_DIR, "displacements.txt"), "w") as f:
-        f.write("Index  Displacement (Å)\n")
-        for i, d in enumerate(displacements):
-            if d > DISPLACEMENT_THRESHOLD:
-                f.write(f"{i:<6}  {d:.6f}\n")
+    # Step 10: Extract spherical fragment around molecule, save
+    sphere = extract_spherical_region(aligned, mol_idx, radius=12.0)
+    write(os.path.join(OUTPUT_DIR, "step9_spherical_fragment.xyz"), sphere)
 
 
 if __name__ == "__main__":
     main()
-
