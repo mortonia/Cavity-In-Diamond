@@ -68,7 +68,6 @@ This will create an `outputs/` folder (if not present) and generate the followin
 | `step7_molecule.xyz`                      | Oriented guest molecule                          |
 | `step8_aligned_structure.xyz`             | Relaxed system realigned to guest axis at origin |
 | `step9_spherical_fragment.xyz`            | Spherical fragment extraction                    |
-| `step10_molecule_with_cavity.xyz`         | Final structure with cavity boundary markers     |
 
 3. **Inspect Outputs**:  
    - Visualize XYZ files in any molecular viewer (e.g., ASE GUI, VMD).  
