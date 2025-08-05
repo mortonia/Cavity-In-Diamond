@@ -1,24 +1,52 @@
-# relaxation.py
-
 import os
 import numpy as np
 from ase.optimize import BFGS
-from lj_calculator import CustomLennardJones
+from ase.constraints import FixAtoms
+from ase.calculators.calculator import Calculator, all_changes
 from config import LJ_PARAMS
+from lj_calculator import CustomLennardJones
 
-def relax_with_lj(atoms, original_positions, displacement_threshold, output_dir):
-    lj = CustomLennardJones(lj_params=LJ_PARAMS, rc=10.0)
-    atoms.set_calculator(lj)
+# Wrapper to subtract rigid-body forces from molecule indices
+class RigidMoleculeWrapper(Calculator):
+    implemented_properties=['energy','forces']
+    def __init__(self, base_calc, molecule_indices):
+        super().__init__()
+        self.base = base_calc
+        self.molecule_indices = molecule_indices
 
-    dyn = BFGS(atoms, logfile=os.path.join(output_dir, "relax.log"))
-    dyn.run(fmax=0.01, steps=200)
+    def calculate(self, atoms=None, properties=['energy','forces'], system_changes=all_changes):
+        self.base.calculate(atoms, properties, system_changes)
+        res = self.base.results
+        forces = res['forces'].copy()
+        mf = forces[self.molecule_indices]
+        com_force = mf.mean(axis=0)
+        mf -= com_force  # remove net translation component
+        for idx, f in zip(self.molecule_indices, mf):
+            forces[idx] -= f
+        self.results = {'energy': res['energy'], 'forces': forces}
 
-    new_positions = atoms.get_positions()
-    displacements = np.linalg.norm(new_positions - original_positions, axis=1)
-    num_displaced = np.sum(displacements > displacement_threshold)
-
-    with open(os.path.join(output_dir, "lj_displacements.txt"), "w") as f:
-        for i, disp in enumerate(displacements):
-            f.write(f"{i} {disp:.4f}\n")
-
-    return atoms, displacements, num_displaced
+# Relaxation routine using CustomLennardJones + BFGS
+def relax_with_lj(atoms, orig_pos, disp_thresh, output_dir,
+                  max_local_dist=100.0, molecule_indices=None):
+    if molecule_indices is None:
+        raise ValueError("Must provide molecule_indices for geometry preservation")
+    atoms = atoms.copy()
+    # Freeze atoms beyond max_local_dist from molecule center
+    cen = atoms.get_positions()[molecule_indices].mean(axis=0)
+    dist = np.linalg.norm(atoms.get_positions() - cen, axis=1)
+    fixed = [i for i, d in enumerate(dist) if d > max_local_dist]
+    atoms.set_constraint(FixAtoms(indices=fixed))
+    # Attach LJ calculator wrapper
+    base = CustomLennardJones(LJ_PARAMS, rc=10.0)
+    atoms.set_calculator(RigidMoleculeWrapper(base, molecule_indices))
+    # Run BFGS
+    log = os.path.join(output_dir, "relaxation.log")
+    dyn = BFGS(atoms, logfile=log, maxstep=0.005)
+    dyn.run(fmax=0.05, steps=100)
+    # Compute displacements
+    new_pos = atoms.get_positions()
+    disp = np.linalg.norm(new_pos - orig_pos, axis=1)
+    count_large = (disp > disp_thresh).sum()
+    print(f"[Relaxation] Max displacement = {disp.max():.3f} Å at atom {disp.argmax()}")
+    print(f"[Relaxation] Atoms with displacement > {disp_thresh:.2f} Å: {count_large}")
+    return atoms, disp, count_large
