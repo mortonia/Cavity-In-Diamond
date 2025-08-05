@@ -1,45 +1,49 @@
-# crystal_utils.py
-
 import numpy as np
+from ase import Atoms
 from ase.build import bulk
-from ase.io import read
-from config import USE_MOLECULAR_CRYSTAL, MOLECULAR_CRYSTAL_FILE
+from ase.neighborlist import NeighborList
+from config import CAVITY_RADII, ELEMENT, LATTICE_CONSTANT, REPEAT
 
-def create_crystal(element, repeat, lattice_constant):
-    if USE_MOLECULAR_CRYSTAL:
-        unitcell = read(MOLECULAR_CRYSTAL_FILE)
 
-        # Fix for .xyz files with no cell info:
-        unitcell.set_cell([[10, 0, 0], [0, 10, 0], [0, 0, 10]])
-        unitcell.set_pbc([True, True, True])
-
-        return unitcell.repeat(repeat)
-    else:
-        crystal = bulk(name=element, crystalstructure='fcc', a=lattice_constant)
-        return crystal.repeat(repeat)
-
-def carve_elliptical_cavity(crystal, center, radius_x, radius_y, radius_z):
-    new_atoms = crystal.copy()
-    positions = new_atoms.get_positions()
-    mask = []
-    for pos in positions:
-        val = ((pos[0] - center[0]) / radius_x) ** 2 + \
-              ((pos[1] - center[1]) / radius_y) ** 2 + \
-              ((pos[2] - center[2]) / radius_z) ** 2
-        mask.append(val > 1.0)
-    return new_atoms[mask]
-
-def tag_cavity_boundary_atoms(crystal, center, radius_x, radius_y, radius_z, delta=0.1):
-    positions = crystal.get_positions()
-    tags = np.zeros(len(crystal), dtype=int)
-
-    for i, pos in enumerate(positions):
-        val = ((pos[0] - center[0]) / radius_x) ** 2 + \
-              ((pos[1] - center[1]) / radius_y) ** 2 + \
-              ((pos[2] - center[2]) / radius_z) ** 2
-        if 1.0 - delta <= val <= 1.0 + delta:
-            tags[i] = 3  # Tag value 3 means cavity boundary
-
-    crystal.set_tags(tags)
+def create_crystal(size=REPEAT, lattice_constant=LATTICE_CONSTANT):
+    crystal = bulk(ELEMENT, 'fcc', a=lattice_constant).repeat(size)
+    crystal.set_pbc(False)
     return crystal
 
+
+def remove_unbound_hydrogens(atoms, max_bond=1.2):
+    cutoffs = [0.5 if s=='H' else 0.8 for s in atoms.get_chemical_symbols()]
+    nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl.update(atoms)
+    keep = []
+    for i,s in enumerate(atoms):
+        if s.symbol!='H': keep.append(i)
+        else:
+            neigh,_ = nl.get_neighbors(i)
+            if any(atoms[j].symbol!='H' for j in neigh): keep.append(i)
+    return atoms[keep]
+
+
+def create_cavity(atoms, center=None, radii=CAVITY_RADII):
+    if center is None:
+        center = atoms.get_positions().mean(axis=0)
+    rx,ry,rz = radii
+    return atoms[[i for i,pos in enumerate(atoms.get_positions())
+                  if (pos-center)**2 @ np.array([1/rx**2,1/ry**2,1/rz**2])>1]]
+
+
+def ellipsoid_atoms(atoms, center=None, radii=CAVITY_RADII):
+    if center is None:
+        center = atoms.get_positions().mean(axis=0)
+    rx,ry,rz=radii
+    return atoms[[i for i,pos in enumerate(atoms.get_positions())
+                  if (pos-center)**2 @ np.array([1/rx**2,1/ry**2,1/rz**2])<=1]]
+
+
+def min_clearance_to_crystal(structure, molecule_indices, cutoff=8.0):
+    pos = structure.get_positions()
+    mol = pos[molecule_indices]
+    cry = np.delete(pos, molecule_indices, axis=0)
+    dmin= np.linalg.norm((cry[:,None,:]-mol[None,:,:]),axis=2).min()
+    i,j = divmod(np.argmin((cry[:,None,:]-mol[None,:,:])**2), mol.shape[0])
+    return dmin, j, i
