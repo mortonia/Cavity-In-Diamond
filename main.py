@@ -68,11 +68,21 @@ def main():
                                           atom1_idx=0, atom2_idx=1,
                                           target_axis=np.array([0.0,1.0,0.0]),
                                           translate_to_origin=True)
+    
     write(os.path.join(OUTPUT_DIR, "step8_aligned_structure.xyz"), aligned)
-
     # Step 10: Extract spherical fragment around molecule, save
     sphere = extract_spherical_region(aligned, mol_idx, radius=12.0)
     write(os.path.join(OUTPUT_DIR, "step9_spherical_fragment.xyz"), sphere)
+
+    #Also step 4: Create a spherical diamond without optimization from the unoptimized crystal
+    aligned_unoptimized_crystal = align_molecule_in_structure(combined, mol_idx,
+                                          atom1_idx=0, atom2_idx=1,
+                                          target_axis=np.array([0.0,1.0,0.0]),
+                                          translate_to_origin=True)
+                                          
+    sphere_unoptimized = extract_spherical_region(aligned_unoptimized_crystal, mol_idx, radius=8.0)
+    write(os.path.join(OUTPUT_DIR, "step4_spherical_unoptimized.xyz"), sphere_unoptimized)
+    
 
 
 if __name__ == "__main__":
