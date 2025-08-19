@@ -16,7 +16,6 @@ from crystal_utils import (
     ellipsoid_markers
 )
 from relaxation import relax_with_lj
-from write_molecule_with_cavity_markers import write_molecule_with_cavity_markers
 
 # Main workflow: builds crystal, carves cavity, inserts molecule, relaxes, and writes outputs
 
