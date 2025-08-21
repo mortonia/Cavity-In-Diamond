@@ -1,3 +1,4 @@
+# --- config.py ---
 import numpy as np
 from ase.io import read
 from molecule_utils import compute_cavity_radii
@@ -8,19 +9,19 @@ MOLECULE_PATH = 'molecules_xyz/propiolic.xyz'
 # Read molecule once for calculating default cavity sizes
 molecule = read(MOLECULE_PATH)
 
-# Crystal building parameters
-ELEMENT = 'Ar'                 # Host crystal element
-LATTICE_CONSTANT = 5.30        # Lattice constant in Ångstroms
-REPEAT = (10, 10, 10)          # Number of unit cells in each direction
+# Crystal building parameters (defaults; CLI/INI can override)
+ELEMENT = 'Ne'
+LATTICE_CONSTANT = 4.46368   # Å
+REPEAT = (9, 9, 9)
 
 # Cavity parameters
-CAVITY_BUFFER = 3.0            # Extra padding around molecule
+CAVITY_BUFFER = 0.1          # Å
 CAVITY_RADII = compute_cavity_radii(molecule, CAVITY_BUFFER)
 
 # Relaxation settings
-DISPLACEMENT_THRESHOLD = 0.1   # Å threshold for reporting large moves
+DISPLACEMENT_THRESHOLD = 0.1 # Å
 
-# Lennard-Jones potential parameters by element
+# Lennard-Jones parameters by element
 LJ_PARAMS = {
     'C': {'epsilon': 0.00284, 'sigma': 3.40},
     'H': {'epsilon': 0.00236, 'sigma': 2.96},
@@ -32,4 +33,3 @@ LJ_PARAMS = {
 
 # Directory for all output files
 OUTPUT_DIR = 'outputs'
-
