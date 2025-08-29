@@ -3,6 +3,11 @@ from ase.calculators.calculator import Calculator, all_changes
 from ase.neighborlist import NeighborList
 import numpy as np
 
+#Please
+#Pretty please
+#for the love of God
+#don't touch this
+
 class CustomLennardJones(Calculator):
     implemented_properties = ['energy', 'forces']
     def __init__(self, lj_params, rc=10.0):
