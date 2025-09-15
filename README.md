@@ -1,205 +1,170 @@
-# README — Guest-in-Crystal (Single‑Vacancy) Workflow
+# Guest-in-Crystal (Single-Vacancy, Midplane Placement)
 
-## What this code does
-
-This project builds a finite crystal cluster (no PBC), carves a **minimal cavity that removes exactly one host atom**, inserts a guest molecule at a specified location, and performs a **localized Lennard–Jones relaxation** while preserving the guest’s internal geometry (rigid‑body constraint). The workflow is configurable via an **INI file** with optional **CLI overrides**.
-
-Key features:
-
-* **Single‑vacancy carving**: robustly removes *one* lattice site using `carve_exact_k(..., k=1)`, with a tiny symmetry‑breaking bias to avoid midplane degeneracy.
-* **Flexible placement**: choose the cavity center by **midplane** (between unit cells), **fractional** supercell coordinates, or explicit **Cartesian** coordinates.
-* **Deterministic orientation**: optionally align the guest along a chosen axis (e.g., +Y) before insertion.
-* **Localized relaxation**: only atoms near the guest are free to move; far atoms are frozen to reduce compute and preserve the outer lattice.
-* **Reproducible outputs**: each pipeline step writes an XYZ for inspection.
+## What this does
+Places an arbitrary molecule inside an fcc-like rare-gas crystal (e.g., Ne), **keeps the molecule exactly between two unit cells**, **removes only one host atom**, maximizes the **minimum** host–guest distance, and relaxes the environment with a custom Lennard-Jones (LJ) model while keeping the guest rigid.
 
 ---
 
-## Repository structure
-
-```
-├── molecule_utils.py        # Load/center guest, compute ellipsoidal radii (semi‑axes)
-├── config.py                # Default params (used as fallbacks: CLI > INI > config.py)
-├── crystal_utils.py         # Build crystal; placement helpers; single‑vacancy carving; insertion; alignment
-├── lj_calculator.py         # Custom LJ calculator (respects frozen atoms)
-├── relaxation.py            # BFGS + wrapper to keep guest rigid (remove internal forces)
-└── main.py                  # Orchestrates: load → build → carve(1) → insert → relax → export
-```
+## Key features
+- **Crystal builder**: finite fcc (or other ASE bulk structures), no PBC.
+- **Guest handling**: robust, molecule-agnostic alignment (auto-picks a good axis if none given).
+- **Single-vacancy guarantee**: removes exactly **one** host atom (unless you explicitly enable clearance pre-trim).
+- **In-plane micro-optimization**: slides the placement **within the midplane only** and re-chooses the best vacancy to maximize the worst Ne–guest gap.
+- **Rigid-guest relaxation**: custom LJ calculator + BFGS; guest remains rigid, host breathes.
+- **Convenient I/O**: INI-configurable workflow, XYZ outputs for each step.
 
 ---
 
-## Installation
+## What changed (and why overlaps went away)
 
-* Python **3.8+**
-* `ase`, `numpy`
+1) **Robust alignment for any molecule**  
+   If atom indices aren’t provided, the code auto-selects an axis (single heavy atom → farthest atom; else farthest pair) and aligns to +Y. Works for tiny guests (e.g., H₂O) and bulky organics.
 
-```bash
-pip install ase numpy
-```
+2) **Smart single-vacancy selection** (still **one** atom removed)  
+   Instead of deleting the nearest host, we test a small candidate set and remove the **one** that maximizes the **worst** (smallest) host–guest distance after insertion.
 
----
+3) **In-plane micro-optimization (midplane preserved)**  
+   We keep the coordinate along your midplane axis fixed (still “between two cells”) and scan tiny **in-plane** shifts (e.g., ±0.25·a on a 5×5 grid). For each shift we re-choose the best single vacancy. This breaks symmetry and finds local “pockets,” increasing clearance **without** removing more atoms.
 
-## Quick start
+4) **Optional orientation search**  
+   Coarse Euler sweep (yaw/pitch/roll) to maximize the minimal Ne–guest gap before carving. Off by default.
 
-1. Put your INI at `inputs/input.ini` (example below).
-2. From the repo root:
-
-```bash
-python3 main.py -i inputs/input.ini
-```
-
-(Use `python` or `py -3` if appropriate on your system.)
-
-Results are written to the directory specified in the INI (or overridden on the CLI). Each stage is saved as `outputs/step*.xyz`; BFGS logs to `outputs/relaxation.log`.
+5) **Optional safety pre-trim**  
+   If you need a guaranteed pre-relax gap, enable a light LJ-based or fixed-Å pre-trim (may remove extra atoms). Leave **off** to enforce single-vacancy.
 
 ---
 
-## INI configuration (recommended)
+## A pinch of math (why the micro-optimization works)
 
-The workflow reads an **INI** file and supports inline comments with `;` or `#`.
+Let host atoms be $\{h_i\}$, the oriented guest atoms $\{p_j\}$, guest COM $p_{\mathrm{com}}$, intended midplane center $c$, and an **in-plane** shift $s$ (component along midplane axis is zero). Placing by COM:
 
-### Full parameter reference
+$$
+g_j(s) = p_j - p_{\mathrm{com}} + c + s, \qquad r_{ij}(s) = \lVert h_i - g_j(s) \rVert_2.
+$$
 
-**\[host]**
+If you remove exactly one host $k$, the remaining worst (closest) separation is
 
-* `element` — host element symbol (e.g., `Ne`, `Ar`).
-* `crystal_structure` — one of `fcc`, `bcc`, `hcp`, `diamond`.
-* `lattice_constant` — Å.
-* `repeat` — `nx, ny, nz` supercell repeats (integers).
+$$
+d_{\min}(s,k) = \min_{i \neq k,\; j} \, r_{ij}(s).
+$$
 
-**\[guest]**
+We pick the best vacancy for that placement and then the best in-plane shift:
 
-* `molecule` — filename of the guest (searched in `./`, `./molecules/`, `./molecules_xyz/`).
+$$
+s^* = \arg\max_{s \in \mathcal{S}} \; \max_{k \in \mathcal{K}} \; \min_{i \neq k,\, j} \lVert h_i - g_j(s) \rVert_2.
+$$
 
-**\[cavity]**
+We solve this via a small 2D grid in the plane $\mathcal{S}$ and a shortlist $\mathcal{K}$ of nearby host atoms. This directly maximizes the **minimum** host–guest distance while keeping (i) the guest on the midplane and (ii) exactly one vacancy.
 
-* `buffer` — Å added to **semi‑axes** computed from the guest’s bounding box.
-* `radii` — optional `rx, ry, rz` in Å to override computed radii.
+---
 
-**\[placement]** (choose one mode)
+## File layout
+- `main.py` — CLI entry, loads INI, orchestrates workflow (placement, single-vacancy + in-plane optimization, relaxation, outputs).
+- `config.py` — defaults (element, lattice constant, repeat, LJ params, paths).
+- `molecule_utils.py` — load/center molecule, compute cavity radii (if you use ellipsoids).
+- `crystal_utils.py` — build crystal; midplane center; **single-vacancy selection**; **in-plane optimization**; alignment; extraction; (optional) orientation and clearance pre-trim.
+- `lj_calculator.py` — custom LJ that respects constraints.
+- `relaxation.py` — BFGS with rigid-guest wrapper.
 
-* `mode` — `midplane` | `fractional` | `cartesian`.
-* For `midplane`: `axis` in `x|y|z`, and `index` in `[0 .. repeat[axis]-2]`.
-* For `fractional`: `center = fx, fy, fz` in `[0,1]` across the whole supercell.
-* For `cartesian`: `center_cart = cx, cy, cz` in Å.
-* Optional: `nudge = dx, dy, dz` in Å to break lattice symmetry (tiny bias).
+---
 
-**\[extract]**
+## Input configuration (INI)
 
-* `radius` — Å for spherical fragment extraction around the guest (post‑relaxation).
-
-**\[output]**
-
-* `dir` — output directory (created if missing).
-* `collision_policy` — `increment` | `timestamp` | `overwrite` | `fail` (controls what happens if `dir` exists).
-
-### Example INI
+Create/edit `inputs/input.ini`. Example:
 
 ```ini
-; inputs/input.ini
 [host]
 element = Ne
 crystal_structure = fcc
-lattice_constant = 4.46368   ; Å
+lattice_constant = 4.46368
 repeat = 9, 9, 9
 
 [guest]
-molecule = propiolic.xyz
+molecule = molecules_xyz/propiolic.xyz   ; or water.xyz, etc.
 
 [cavity]
-buffer = 0.10                 ; Å
-; radii = 3.0, 3.0, 3.0       ; (optional) override computed semi‑axes
+buffer = 0.10                            ; used for orientation search / ellipsoid utils
+; radii = 3.0, 2.5, 3.2                  ; optional (Å)
 
 [placement]
-mode = midplane
-axis = y
-index = 3
-; nudge = 0.004, 0, 0         ; small bias (Å), optional
+mode = midplane                          ; midplane | fractional | cartesian
+axis = x                                  ; axis defining the midplane
+index = 4                                  ; between unit cells index and index+1
+bias_frac = 0.05                           ; tiny degeneracy-breaking nudge (fraction of a)
+; center = 0.5, 0.5, 0.5                  ; if mode=fractional
+; center_cart = 10.0, 20.0, 15.0          ; if mode=cartesian
+; nudge = 0.0, 0.0, 0.0                   ; optional small Cartesian tweak
+
+[orient]
+enable = false                            ; set true for bulky guests
+yaw_steps = 12
+pitch_steps = 6
+roll_steps = 1
+; clearance_floor = 3.3                   ; early-exit if min distance ≥ floor (Å)
+
+[clearance]
+mode = off                                ; off | lj | fixed
+rmin_scale = 1.00                         ; with lj: threshold = r_min * scale
+min = 3.0                                 ; with fixed: Å threshold
 
 [extract]
 radius = 12.0
 
 [output]
 dir = outputs
-collision_policy = increment
+collision_policy = increment              ; increment | timestamp | overwrite | fail
 ```
 
 ---
 
-## Command‑line overrides
+## How to run
 
-CLI overrides **win over INI**, and INI wins over `config.py`.
-
-**Use a specific INI**
-
+### Basic
 ```bash
-python3 main.py -i inputs/input.ini
+python main.py --input inputs/input.ini
 ```
 
-**Override host & output on the fly**
-
+### Helpful overrides
 ```bash
-python3 main.py -i inputs/input.ini \
-  --element Ne --structure fcc --lattice-constant 4.46368 --repeat "9, 9, 9" \
-  --output-dir outputs/ne_run --collision-policy increment
-```
+# Use a different molecule + enable orientation search
+python main.py -i inputs/input.ini --molecule molecules_xyz/water.xyz --orient-enable
 
-**Pick a placement mode**
+# Place between y-cells 5 and 6 with small in-plane bias
+python main.py -i inputs/input.ini --placement-mode midplane --placement-axis y --placement-index 5 --placement-bias-frac 0.05
 
-```bash
-# Midplane between unit cells along y (index must be 0..ny-2)
-python3 main.py -i inputs/input.ini --placement-mode midplane --placement-axis y --placement-index 3
-
-# Fractional supercell coordinates (0..1)
-python3 main.py -i inputs/input.ini --placement-mode fractional --placement-center-frac "0.5, 0.5, 0.5"
-
-# Explicit Cartesian center (Å)
-python3 main.py -i inputs/input.ini --placement-mode cartesian --placement-center-cart "12.0, 10.5, 8.0"
-
-# Optional tiny symmetry‑breaking bias (Å)
-python3 main.py -i inputs/input.ini --placement-nudge "0.004, 0, 0"
+# Fractional placement (not midplane), with fixed clearance pre-trim at 3.2 Å
+python main.py -i inputs/input.ini --placement-mode fractional --placement-center-frac 0.5,0.5,0.5   --clearance-mode fixed --clearance-min 3.2
 ```
 
 ---
 
-## Outputs
-
-* `step1_crystal.xyz` — pristine cluster
-* `step2_cavity.xyz` — cluster after **single‑atom** cavity removal
-* `step3_molecule_inserted.xyz` — guest placed at the cavity center
-* `step5_relaxed_full.xyz` — post‑relaxation structure (guest + host)
-* `step6_relaxed_crystal_cavity_no_molecule.xyz` — host only, unbound H removed
-* `step7_molecule.xyz` — oriented guest molecule
-* `step8_aligned_structure.xyz` — relaxed system realigned to guest axis at origin
-* `step9_spherical_fragment.xyz` — spherical fragment around the guest
-* `relaxation.log` — BFGS optimization log
-
-During carving you’ll also see a console line such as:
-
-```
-[Cavity] Removed indices=[1234] (scale=0.543210)
-```
-
-`indices` is the removed atom(s); `scale` is the ellipsoid scaling used to hit `k=1`.
+## Outputs (in `output.dir`)
+- `step1_crystal.xyz` — pristine finite crystal  
+- `step2_cavity.xyz` — **one atom removed** (or more if you enabled pre-trim)  
+- `step3_molecule_inserted.xyz` — guest inserted at optimized center (guest fixed)  
+- `step5_relaxed_full.xyz` — post-LJ relaxation (guest rigid, host relaxed)  
+- `step6_relaxed_crystal_cavity_no_molecule.xyz` — host only (guest removed)  
+- `step7_molecule.xyz` — oriented guest used for insertion  
+- `step8_aligned_structure.xyz` — final realigned structure (guest axis to +Y, origin)  
+- `step9_spherical_fragment.xyz` — local sphere around guest  
 
 ---
 
-## How the single‑vacancy carving works
-
-1. We compute an ellipsoid from the guest’s bounding box (semi‑axes + buffer) or use radii you supply.
-2. The chosen center is **nudged slightly** toward the nearest lattice site to break midplane ties.
-3. A bisection search (`carve_exact_k`) scales the ellipsoid to include **exactly one** atom (strict interior test keeps boundary atoms). If geometry makes this impossible, it falls back to removing the **nearest** atom.
-4. We insert the molecule at the same center and **skip fit checks** (since we deliberately carved only one site).
-
----
-
-## Tips & troubleshooting
-
-* **Too many atoms removed**: ensure your INI sets `mode` correctly; keep a small `nudge` (e.g., `0.004,0,0`) to break symmetry; rely on the default single‑vacancy path via `carve_exact_k(..., k=1)`.
-* **No relaxation**: your `fmax` in `relaxation.py` is conservative (`0.01`). For stronger relaxations, consider `0.05` and/or increase LJ cutoff `rc` in `lj_calculator.py`.
-* **Units**: all distances are **Å**.
-* **Performance**: large `repeat` values grow the number of host atoms cubically.
+## Tuning for bulky/asymmetric guests
+- **Orientation search**: set `[orient] enable = true`; try `yaw_steps=24`, `pitch_steps=12`.  
+- **In-plane optimizer** (edit in `main.py` if needed):  
+  `max_shift_frac = 0.20–0.30`, `n_steps = 7`, `candidates = 32–64`.  
+- **Pre-trim (last resort)**: `[clearance] mode = lj` with `rmin_scale ≈ 1.00–1.05` or `mode = fixed` with a modest Å cutoff. (May remove >1 atom; keep **off** if you must enforce single vacancy.)
 
 ---
 
-*Developed for minimal‑footprint guest insertion in nearly perfect fcc lattices; tuned for deterministic single‑site removal with clear, reproducible outputs.*
+## Troubleshooting
+- **Overlap persists pre-relax**: increase in-plane grid/range and candidate pool; enable orientation search.  
+- **More than one host removed**: you likely enabled `[clearance] mode`. Set to `off` to enforce single-vacancy.  
+- **Not on the midplane**: use `placement.mode = midplane` and set `axis`/`index`; avoid large `nudge`.  
+- **Tiny or zero displacements on relax**: check that the guest is constrained (rigid) and the host is free; ensure LJ parameters include all involved elements.
 
+---
+
+## Why this matches the physics
+LJ repulsion grows rapidly at small $r$. By maximizing the **minimum** host–guest distance after removing **one** well-chosen host atom—and allowing only **in-plane** micro-shifts—the initial geometry avoids pathological contacts while preserving a visually fcc environment. The subsequent rigid-guest relaxation then equilibrates the first shell without distorting the molecule.
