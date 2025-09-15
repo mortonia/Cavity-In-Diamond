@@ -74,46 +74,98 @@ Create/edit `inputs/input.ini`. Example:
 
 ```ini
 [host]
+; Element symbol for the host crystal (rare gas recommended)
 element = Ne
+
+; ASE bulk crystal structure name: fcc | bcc | hcp | diamond
 crystal_structure = fcc
+
+; Lattice constant in Å
 lattice_constant = 4.46368
+
+; Supercell repetition counts: nx, ny, nz
 repeat = 9, 9, 9
 
+
 [guest]
-molecule = molecules_xyz/propiolic.xyz   ; or water.xyz, etc.
+; Path to the guest molecule XYZ (relative to repo root is fine)
+molecule = molecules_xyz/water.xyz
+
 
 [cavity]
-buffer = 0.10                            ; used for orientation search / ellipsoid utils
-; radii = 3.0, 2.5, 3.2                  ; optional (Å)
+; Extra padding used by some utilities (e.g., ellipsoid sizing or orientation search)
+buffer = 0.10
+
+; OPTIONAL override for cavity radii in Å (uncomment to use)
+; radii = 3.0, 2.5, 3.2
+
 
 [placement]
-mode = midplane                          ; midplane | fractional | cartesian
-axis = x                                  ; axis defining the midplane
-index = 4                                  ; between unit cells index and index+1
-bias_frac = 0.05                           ; tiny degeneracy-breaking nudge (fraction of a)
-; center = 0.5, 0.5, 0.5                  ; if mode=fractional
-; center_cart = 10.0, 20.0, 15.0          ; if mode=cartesian
-; nudge = 0.0, 0.0, 0.0                   ; optional small Cartesian tweak
+; Placement mode: midplane | fractional | cartesian
+mode = midplane
+
+; Midplane axis: x | y | z  (used when mode = midplane)
+axis = x
+
+; Midplane index (between unit cells index and index+1)  (used when mode = midplane)
+index = 4
+
+; Small degeneracy-breaking nudge as a fraction of the lattice constant (e.g., 0.02–0.08)
+bias_frac = 0.05
+
+; OPTIONAL small Cartesian tweak in Å (applied after center selection)
+; nudge = 0.0, 0.0, 0.0
+
+; OPTIONAL fractional center across entire supercell (used when mode = fractional)
+; center = 0.5, 0.5, 0.5
+
+; OPTIONAL explicit Cartesian center in Å (used when mode = cartesian)
+; center_cart = 10.0, 20.0, 15.0
+
 
 [orient]
-enable = false                            ; set true for bulky guests
+; Enable coarse orientation search to maximize minimal host–guest distance (recommended for bulky guests)
+enable = false
+
+; Number of yaw samples (around +Y by default)
 yaw_steps = 12
+
+; Number of pitch samples
 pitch_steps = 6
+
+; Number of roll samples
 roll_steps = 1
-; clearance_floor = 3.3                   ; early-exit if min distance ≥ floor (Å)
+
+; OPTIONAL early stop if minimal distance ≥ this value (Å)
+; clearance_floor = 3.3
+
 
 [clearance]
-mode = off                                ; off | lj | fixed
-rmin_scale = 1.00                         ; with lj: threshold = r_min * scale
-min = 3.0                                 ; with fixed: Å threshold
+; Pre-trim mode before insertion:
+;   off   = do nothing (enforces single vacancy only)
+;   lj    = remove hosts that violate r_min(sigma_mix) * rmin_scale (may remove >1 atom)
+;   fixed = remove hosts closer than 'min' Å (may remove >1 atom)
+mode = off
+
+; Scale factor for LJ r_min threshold when mode = lj
+rmin_scale = 1.00
+
+; Fixed Å threshold when mode = fixed
+min = 3.0
+
 
 [extract]
+; Radius in Å for the final spherical fragment around the guest
 radius = 12.0
 
+
 [output]
+; Output directory (created if missing; collision policy applies)
 dir = outputs
-collision_policy = increment              ; increment | timestamp | overwrite | fail
-```
+
+; Handling when the output directory already exists:
+;   increment | timestamp | overwrite | fail
+collision_policy = increment
 
 ---
 
